@@ -1,9 +1,10 @@
 const express = require('express');
-const { default: makeWASocket, useMultiFileAuthState, Browsers } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, Browsers, DisconnectReason } = require('@whiskeysockets/baileys');
 const Pino = require('pino');
 const fs = require('fs');
 const axios = require('axios');
 const moment = require('moment-timezone');
+const { exec } = require('child_process');
 
 moment.tz.setDefault('Asia/Jakarta');
 
@@ -122,89 +123,99 @@ const commands = {
 
 // ========== BOT WHATSAPP ==========
 let sock = null;
-let pairingCodes = {};
+let isBotConnected = false;
 
 async function startBot() {
-    const { state, saveCreds } = await useMultiFileAuthState('bot_session');
-    sock = makeWASocket({
-        auth: state,
-        logger: Pino({ level: 'silent' }),
-        browser: Browsers.macOS('Desktop'),
-        printQRInTerminal: false
-    });
+    try {
+        const { state, saveCreds } = await useMultiFileAuthState('bot_session');
+        sock = makeWASocket({
+            auth: state,
+            logger: Pino({ level: 'silent' }),
+            browser: Browsers.macOS('Desktop'),
+            printQRInTerminal: false,
+            defaultQueryTimeoutMs: 60000,
+            keepAliveIntervalMs: 30000
+        });
 
-    sock.ev.on('creds.update', saveCreds);
-    
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect } = update;
-        if (connection === 'open') {
-            console.log('✅ BOT AKTIF!');
-        }
-        if (connection === 'close') {
-            setTimeout(startBot, 5000);
-        }
-    });
+        sock.ev.on('creds.update', saveCreds);
+        
+        sock.ev.on('connection.update', (update) => {
+            const { connection, lastDisconnect } = update;
+            if (connection === 'open') {
+                isBotConnected = true;
+                console.log('✅ BOT AKTIF!');
+            }
+            if (connection === 'close') {
+                isBotConnected = false;
+                console.log('❌ Koneksi putus, reconnect dalam 5 detik...');
+                setTimeout(startBot, 5000);
+            }
+        });
 
-    // Proses pesan
-    sock.ev.on('messages.upsert', async ({ messages }) => {
-        const msg = messages[0];
-        if (!msg.message || msg.key.fromMe) return;
-        
-        const from = msg.key.remoteJid;
-        let body = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
-        const sender = msg.key.participant || from.split('@')[0];
-        const isPremium = premiumUsers.includes(sender);
-        
-        if (!body.startsWith('!') && !body.startsWith('.')) return;
-        
-        let cmd = body.slice(1).split(' ')[0].toLowerCase();
-        let args = body.split(' ').slice(1);
-        
-        if (users[sender] === undefined) users[sender] = DAILY_LIMIT;
-        
-        let noLimit = ['claim', 'limit', 'menu', 'ping', 'owner'];
-        if (users[sender] <= 0 && !isPremium && !noLimit.includes(cmd) && body.startsWith('!')) {
-            await sock.sendMessage(from, { text: '⚠️ Limit habis! Ketik !claim' });
-            return;
-        }
-        
-        if (!noLimit.includes(cmd) && !isPremium && body.startsWith('!')) {
-            users[sender]--;
-            saveData();
-        }
-        
-        let reply = '';
-        switch(cmd) {
-            case 'menu': reply = commands.menu(sender, isPremium); break;
-            case 'ping': reply = commands.ping(); break;
-            case 'time': reply = commands.time(); break;
-            case 'owner': reply = commands.owner(); break;
-            case 'limit': reply = commands.limit(sender); break;
-            case 'claim': reply = commands.claim(sender); break;
-            case 'fact': reply = await commands.fact(); break;
-            case 'quotes': reply = await commands.quotes(); break;
-            case 'joke': reply = await commands.joke(); break;
-            case 'suit': reply = commands.suit(args); break;
-            case 'random': reply = commands.random(args); break;
-            case 'truth': reply = commands.truth(); break;
-            case 'dare': reply = commands.dare(); break;
-            case 'stiker': reply = commands.sticker(); break;
-            case 'toimg': reply = commands.toimg(); break;
-            case 'ytmp3': reply = commands.ytmp3(args[0]); break;
-            case 'tiktok': reply = commands.tiktok(args[0]); break;
-            case 'ig': reply = commands.ig(args[0]); break;
-            case 'fb': reply = commands.fb(args[0]); break;
-            case 'addprem': reply = commands.addprem(args[0], sender); break;
-            case 'delprem': reply = commands.delprem(args[0], sender); break;
-            default: if(body.startsWith('!')) reply = '❌ Perintah salah. Ketik !menu';
-        }
-        if(reply) await sock.sendMessage(from, { text: reply });
-    });
+        // Proses pesan
+        sock.ev.on('messages.upsert', async ({ messages }) => {
+            const msg = messages[0];
+            if (!msg.message || msg.key.fromMe) return;
+            
+            const from = msg.key.remoteJid;
+            let body = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
+            const sender = msg.key.participant || from.split('@')[0];
+            const isPremium = premiumUsers.includes(sender);
+            
+            if (!body.startsWith('!') && !body.startsWith('.')) return;
+            
+            let cmd = body.slice(1).split(' ')[0].toLowerCase();
+            let args = body.split(' ').slice(1);
+            
+            if (users[sender] === undefined) users[sender] = DAILY_LIMIT;
+            
+            let noLimit = ['claim', 'limit', 'menu', 'ping', 'owner'];
+            if (users[sender] <= 0 && !isPremium && !noLimit.includes(cmd) && body.startsWith('!')) {
+                await sock.sendMessage(from, { text: '⚠️ Limit habis! Ketik !claim' });
+                return;
+            }
+            
+            if (!noLimit.includes(cmd) && !isPremium && body.startsWith('!')) {
+                users[sender]--;
+                saveData();
+            }
+            
+            let reply = '';
+            switch(cmd) {
+                case 'menu': reply = commands.menu(sender, isPremium); break;
+                case 'ping': reply = commands.ping(); break;
+                case 'time': reply = commands.time(); break;
+                case 'owner': reply = commands.owner(); break;
+                case 'limit': reply = commands.limit(sender); break;
+                case 'claim': reply = commands.claim(sender); break;
+                case 'fact': reply = await commands.fact(); break;
+                case 'quotes': reply = await commands.quotes(); break;
+                case 'joke': reply = await commands.joke(); break;
+                case 'suit': reply = commands.suit(args); break;
+                case 'random': reply = commands.random(args); break;
+                case 'truth': reply = commands.truth(); break;
+                case 'dare': reply = commands.dare(); break;
+                case 'stiker': reply = commands.sticker(); break;
+                case 'toimg': reply = commands.toimg(); break;
+                case 'ytmp3': reply = commands.ytmp3(args[0]); break;
+                case 'tiktok': reply = commands.tiktok(args[0]); break;
+                case 'ig': reply = commands.ig(args[0]); break;
+                case 'fb': reply = commands.fb(args[0]); break;
+                case 'addprem': reply = commands.addprem(args[0], sender); break;
+                case 'delprem': reply = commands.delprem(args[0], sender); break;
+                default: if(body.startsWith('!')) reply = '❌ Perintah salah. Ketik !menu';
+            }
+            if(reply) await sock.sendMessage(from, { text: reply });
+        });
+    } catch (err) {
+        console.log('Error startBot:', err);
+        setTimeout(startBot, 10000);
+    }
 }
 
 startBot();
 
-// ========== WEBSITE PAIRING + HTML ==========
+// ========== WEBSITE PAIRING ==========
 const app = express();
 app.use(express.json());
 
@@ -258,6 +269,8 @@ const htmlPage = `<!DOCTYPE html>
         .steps ol { margin-left: 20px; margin-top: 10px; }
         .error { background: rgba(255,68,68,0.2); border: 1px solid #ff4444; border-radius: 15px; padding: 12px; margin-top: 15px; display: none; }
         .error.show { display: block; }
+        .loading { display: none; margin-top: 15px; }
+        .loading.show { display: block; }
         footer { margin-top: 30px; font-size: 0.7rem; color: #4a5a7a; }
     </style>
 </head>
@@ -269,9 +282,10 @@ const htmlPage = `<!DOCTYPE html>
             <div class="subtitle">Pairing Gateway - Hubungkan Bot ke WhatsApp</div>
             <div class="input-group">
                 <label>📱 Nomor WhatsApp</label>
-                <input type="tel" id="phoneNumber" placeholder="6281234567890">
+                <input type="tel" id="phoneNumber" placeholder="6281234567890" value="628">
             </div>
             <button class="btn" id="generateBtn">🔗 GENERATE PAIRING CODE</button>
+            <div id="loading" class="loading">⏳ Memproses, tunggu sebentar...</div>
             <div id="codeBox" class="code-box">
                 <div class="code-label">✨ PAIRING CODE:</div>
                 <div class="code-value" id="pairingCode">------</div>
@@ -295,15 +309,24 @@ const htmlPage = `<!DOCTYPE html>
             let phone = document.getElementById('phoneNumber').value.trim();
             phone = phone.replace(/[^0-9]/g, '');
             if (!phone.startsWith('62')) phone = '62' + phone;
-            if (phone.length < 10) {
-                document.getElementById('errorMsg').innerText = 'Nomor tidak valid!';
+            if (phone.length < 10 || phone.length > 15) {
+                document.getElementById('errorMsg').innerText = 'Nomor tidak valid! Contoh: 6281234567890';
                 document.getElementById('errorMsg').classList.add('show');
                 setTimeout(() => document.getElementById('errorMsg').classList.remove('show'), 3000);
                 return;
             }
+            
             const btn = document.getElementById('generateBtn');
+            const loading = document.getElementById('loading');
+            const codeBox = document.getElementById('codeBox');
+            const errorMsg = document.getElementById('errorMsg');
+            
             btn.disabled = true;
             btn.innerText = '⏳ Memproses...';
+            loading.classList.add('show');
+            codeBox.classList.remove('show');
+            errorMsg.classList.remove('show');
+            
             try {
                 const res = await fetch('/api/pair', {
                     method: 'POST',
@@ -313,17 +336,18 @@ const htmlPage = `<!DOCTYPE html>
                 const data = await res.json();
                 if (data.code) {
                     document.getElementById('pairingCode').innerText = data.code;
-                    document.getElementById('codeBox').classList.add('show');
+                    codeBox.classList.add('show');
                 } else {
-                    document.getElementById('errorMsg').innerText = data.error || 'Gagal';
-                    document.getElementById('errorMsg').classList.add('show');
+                    errorMsg.innerText = data.error || 'Gagal mendapatkan kode. Pastikan nomor aktif!';
+                    errorMsg.classList.add('show');
                 }
             } catch(err) {
-                document.getElementById('errorMsg').innerText = 'Server error: ' + err.message;
-                document.getElementById('errorMsg').classList.add('show');
+                errorMsg.innerText = 'Server error: ' + err.message;
+                errorMsg.classList.add('show');
             } finally {
                 btn.disabled = false;
                 btn.innerText = '🔗 GENERATE PAIRING CODE';
+                loading.classList.remove('show');
             }
         };
     </script>
@@ -336,19 +360,45 @@ app.post('/api/pair', async (req, res) => {
     const { phone } = req.body;
     if (!phone) return res.status(400).json({ error: 'Nomor diperlukan' });
     
+    // Bersihkan nomor
+    let cleanPhone = phone.replace(/\D/g, '');
+    if (!cleanPhone.startsWith('62')) cleanPhone = '62' + cleanPhone;
+    
+    console.log(`📱 Minta pairing untuk: ${cleanPhone}`);
+    
     try {
-        const { state, saveCreds } = await useMultiFileAuthState(`temp_${phone}`);
+        // Hapus session lama jika ada
+        const sessionPath = `./temp_session_${cleanPhone}`;
+        if (fs.existsSync(sessionPath)) {
+            fs.rmSync(sessionPath, { recursive: true, force: true });
+        }
+        
+        const { state, saveCreds } = await useMultiFileAuthState(`temp_session_${cleanPhone}`);
         const tempSock = makeWASocket({
             auth: state,
             logger: Pino({ level: 'silent' }),
             browser: Browsers.macOS('Desktop'),
-            printQRInTerminal: false
+            printQRInTerminal: false,
+            defaultQueryTimeoutMs: 30000
         });
         
-        const code = await tempSock.requestPairingCode(phone);
-        setTimeout(() => saveCreds(), 1000);
+        // Request pairing code
+        const code = await tempSock.requestPairingCode(cleanPhone);
+        console.log(`✅ Pairing code untuk ${cleanPhone}: ${code}`);
+        
+        // Simpan creds
+        setTimeout(() => saveCreds(), 2000);
+        
+        // Hapus session setelah 1 menit
+        setTimeout(() => {
+            if (fs.existsSync(sessionPath)) {
+                fs.rmSync(sessionPath, { recursive: true, force: true });
+            }
+        }, 60000);
+        
         res.json({ code, success: true });
     } catch (err) {
+        console.error(`❌ Error pairing untuk ${cleanPhone}:`, err.message);
         res.status(500).json({ error: err.message });
     }
 });
